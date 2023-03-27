@@ -6,17 +6,15 @@ Created on Sun Mar 26 18:34:37 2023
 @author: fang
 """
 
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import numpy as np
 from scipy.special import logsumexp, softmax, gammaln
 from scipy.stats import poisson
+from tqdm import tqdm
 
 
     
 eps = 1e-6
-Omega = 1e3
+Omega = 1e6
 
 
 class GammaPoissonMixture:
@@ -31,10 +29,10 @@ class GammaPoissonMixture:
     weights : ndarray of shape (n_components,). Weights of each mixture as in GMM.
     alpha : ndarray of shape (n_components,). alpha of the Gamma distribution.
             The lower bound is 1e-6 (the uninformative prior: alpha -> 0+).
-            The upper bound is 1000 (the Poisson limits: alpha -> +inf).
+            The upper bound is 1e6 (the Poisson limits: alpha -> +inf).
     """
 
-    def __init__(self, n_components=1, verbose=0):
+    def __init__(self, n_components=1, verbose=1):
         self.n_components = n_components
         self.verbose = verbose    
         return
@@ -92,8 +90,10 @@ class GammaPoissonMixture:
         logL += gammaln(self.alpha)[None,:]
         
         logL += np.log(self.weights)[None,:]
+        logL = np.nan_to_num(logL)
         # Q = softmax(logL, axis=1)
         a = np.amax(logL,axis=(-1))
+        a = np.nan_to_num(a)
         relative_L = np.exp(logL-a[:,None])
         relative_L_sum = relative_L.sum(axis=(-1))
         Q = relative_L/relative_L_sum[:,None]
@@ -102,7 +102,8 @@ class GammaPoissonMixture:
         
    
     def _fit(self, X, epoch):
-        for i in range(epoch):
+        silence = not bool(self.verbose)
+        for i in tqdm(range(epoch), disable=silence):
             Q, lower_bound = self._e_step(X)  
             print(lower_bound)
             self._m_step(X, Q)
@@ -206,7 +207,6 @@ class GammaPoissonMixture:
         n, p, s = np.shape(X)
         self.n_parameters = self.theta.size + self.n_components - 1      
         return self.compute_lower_bound(X) - self.n_parameters/n
-
 
 
     
