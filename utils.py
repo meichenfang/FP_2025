@@ -5,12 +5,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from tqdm import tqdm
 from multiprocessing import Pool
+from typing import Callable, List, Any
 
 gray = '#8b96ad'
 red = '#c74546'
 
 def estimate_s(N1, N2=None, plot=True, ax=None, min_mean=0.1, max_mean=np.inf, 
-               bins=np.arange(-0.5, 1.5, 0.01) - 0.005, color='lightgray', modcolor='#0070c0', 
+               bins=np.arange(-0.5, 1.5, 0.01) - 0.005, histcolor='lightgray', modcolor='#0070c0', 
                meancolor='#3d405b'):
     """
     Estimates the extrinsic noise `s`.
@@ -95,204 +96,189 @@ def estimate_s(N1, N2=None, plot=True, ax=None, min_mean=0.1, max_mean=np.inf,
         if ax is None:
             fig, ax = plt.subplots(1, 1)
         if N2 is None:
-            hist, bins, patches = ax.hist(eta.flatten(), bins=bins, label=str(p) + ' genes', color=color)
+            hist, bins, patches = ax.hist(eta.flatten(), bins=bins, label=str(p) + ' genes', color=histcolor)
+        else:
+            hist, bins, patches = ax.hist(eta.flatten(), bins=bins, label=str(p1) + r'$\times$' + str(p2) + ' genes', color=histcolor)
+        s_mod = (bins[np.argmax(hist)] + bins[np.argmax(hist) + 1]) / 2
+        ax.axvline(x=s, c=meancolor, zorder=0, linewidth=6, label='mean=' + str(np.around(s, 3)))
+        ax.axvline(x=s_mod, c=modcolor, zorder=0, linewidth=6, label='mode=' + str(np.around(s_mod, 3)))
+        ax.legend(loc='upper right')
+    return {'mod':s_mod,'mean':s}
+    
+def estimate_s_(N1, N2=None, plot=True, ax=None, min_mean=0.1, max_mean=np.inf, 
+               bins=np.arange(-0.5, 1.5, 0.01) - 0.005, color='lightgray', modcolor='#0070c0', 
+               meancolor='#3d405b'):
+    ### calculate normalized covariance
+    if N2 is None:
+        idx = (N1.mean(0) > min_mean) & (N1.mean(0) < max_mean)
+        X = N1[:, idx]
+        X_mean = X.mean(0)
+        p = len(X_mean)
+        eta = np.cov(X, rowvar=False) / X_mean[:, None] / X_mean[None, :]
+        np.fill_diagonal(eta, np.nan)
+        eta = eta[~np.isnan(eta)]
+
+    else:
+        idx1 = (N1.mean(0) > min_mean) & (N1.mean(0) < max_mean)
+        idx2 = (N2.mean(0) > min_mean) & (N2.mean(0) < max_mean)
+        X = np.concatenate((N1[:, idx1], N2[:, idx2]), axis=1)
+        X_mean = X.mean(0)
+        p1 = idx1.sum()
+        p2 = idx2.sum()
+        eta = np.cov(X, rowvar=False) / X_mean[:, None] / X_mean[None, :]
+        eta = eta[p1:, :p1]
+        
+    ### calculate s as the mean
+    s = np.mean(eta)
+
+    ### calculate s_mod as the midpoint of the most frequent bin in the histogram.
+    if plot is False:
+        hist, bins = np.histogram(eta.flatten(), bins=bins)
+        s_mod = (bins[np.argmax(hist)] + bins[np.argmax(hist) + 1]) / 2
+    else:
+        if ax is None:
+            fig, ax = plt.subplots(1, 1)
+        if N2 is None:
+            hist, bins, patches = ax.hist(eta.flatten(), bins=bins, label='sd='+str(np.around(np.std(eta), 3)), color=color)
         else:
             hist, bins, patches = ax.hist(eta.flatten(), bins=bins, label=str(p1) + r'$\times$' + str(p2) + ' genes', color=color)
         s_mod = (bins[np.argmax(hist)] + bins[np.argmax(hist) + 1]) / 2
         ax.axvline(x=s, c=meancolor, zorder=0, linewidth=6, label='mean=' + str(np.around(s, 3)))
         ax.axvline(x=s_mod, c=modcolor, zorder=0, linewidth=6, label='mode=' + str(np.around(s_mod, 3)))
         ax.legend(loc='upper right')
-    return {'mod':s_mod,'mean':s}
-
-def bootstrapping_s_single(b, bootstrap_indices, data1, data2, min_mean):
+    return
+    
+def bootstrapping_func(
+    func: Callable,
+    datasets: List[np.ndarray],
+    B: int = 1000,
+    alpha: float = 0.05,
+    seed: int = 0,
+    n_cores: int = 1
+):
     """
-    Computes the extrinsic noise `s` for a single bootstrap sample.
+    Performs bootstrapping to estimate the statistics calculated by func given a list of datasets.
 
     Parameters
     ----------
-    b : int
-        The bootstrap sample index.
-    bootstrap_indices : ndarray
-        Array of indices for resampling the data.
-    data1 : ndarray
-        The first dataset to compute extrinsic noise `s`.
-    data2 : ndarray or None
-        The second dataset to compute extrinsic noise `s`, or None if not used.
-    min_mean : float
-        Minimum mean threshold to filter features.
-
-    Returns
-    -------
-    s1 : float
-        The estimated extrinsic noise `s` for `data1`.
-    s2 : float or None
-        The estimated extrinsic noise `s` for `data2`, or None if `data2` is not provided.
-    """
-    b_idx = bootstrap_indices[b]
-
-    # Process data1
-    N1 = data1[b_idx]
-    idx = (N1.mean(0) > min_mean)
-    X = N1[:, idx]
-    X_mean = X.mean(0)
-    p = len(X_mean)
-    eta = np.cov(X, rowvar=False) / X_mean[:, None] / X_mean[None, :]
-    np.fill_diagonal(eta, np.nan)
-    eta = eta[~np.isnan(eta)]
-    s1_mean = np.mean(eta)
-    hist, bins = np.histogram(eta.flatten(), bins=np.arange(0, 1, 0.01) - 0.005)
-    s1 = (bins[np.argmax(hist)] + bins[np.argmax(hist) + 1]) / 2
-
-    # Process data2 if provided
-    if data2 is not None:
-        N2 = data2[b_idx]
-        idx = (N2.mean(0) > min_mean)
-        X = N2[:, idx]
-        X_mean = X.mean(0)
-        p = len(X_mean)
-        eta = np.cov(X, rowvar=False) / X_mean[:, None] / X_mean[None, :]
-        np.fill_diagonal(eta, np.nan)
-        eta = eta[~np.isnan(eta)]
-        s2_mean = np.mean(eta)
-        hist, bins = np.histogram(eta.flatten(), bins=np.arange(0, 1, 0.01) - 0.005)
-        s2 = (bins[np.argmax(hist)] + bins[np.argmax(hist) + 1]) / 2
-    else:
-        s2 = None
-
-    return s1, s2
-
-
-def bootstrapping_s(data1, data2=None, B=1000, seed=0, min_mean=0.1, n_cores=1):
-    """
-    Performs bootstrapping to estimate the extrinsic noise `s` for given datasets.
-
-    Parameters
-    ----------
-    data1 : ndarray
-        The first dataset to compute extrinsic noise `s`.
-    data2 : ndarray or None, optional
-        The second dataset to compute extrinsic noise `s`, or None if not used.
+    func : Callable
+        Function used to calculate statistics like extrinsic noise on each bootstrap sample.
+    datasets : List[np.ndarray]
+        List of 2D datasets to compute func. Each dataset has shape (n_samples, n_features).
     B : int, optional
         Number of bootstrap samples. Default is 1000.
+    alpha : float, optional
+        Significance level for confidence intervals. Default is 0.05 for 95% confidence.
     seed : int, optional
         Seed for random number generation. Default is 0.
-    min_mean : float, optional
-        Minimum mean threshold to filter features. Default is 0.1.
     n_cores : int, optional
         Number of cores to use for parallel processing. Default is 1.
-
-    Returns
-    -------
-    s_bootstrap : ndarray
-        Array of extrinsic noise estimates `s` for each bootstrap sample.
-    """
-    np.random.seed(seed)
-    n, p = data1.shape
-    bootstrap_indices = np.random.choice(n, size=(B, n), replace=True)
-
-    # Create a pool of workers
-    with Pool(processes=n_cores) as pool:
-        # Map the worker function to each bootstrap sample
-        s_bootstrap = list(pool.starmap(bootstrapping_s_single, 
-                                             [(b, bootstrap_indices, data1, data2, min_mean) for b in range(B)]), 
-                                total=B)
-
-    return np.array(s_bootstrap)
-    
-def bootstrapping_var_single(args):
-    """
-    Computes the bootstrapped variance and residue for a single sample, including extrinsic noise estimation.
-
-    Parameters
-    ----------
-    args : tuple
-        A tuple containing:
-        - data : ndarray
-            Original dataset with observations as rows and features as columns.
-        - indices : ndarray
-            Indices for resampling the data.
-        - bootstrap_s : bool
-            If True, calculates the extrinsic noise `s` for covariance adjustment.
-
-    Returns
-    -------
-    residue : ndarray
-        The adjusted residue of the variance for each feature.
-    s : float
-        The estimated extrinsic noise `s` if `bootstrap_s` is True, otherwise 0.
-    """
-    data, indices, bootstrap_s = args
-    X = data[indices]  # Resample data using given indices
-    bootstrap_var = X.var(axis=0)
-    bootstrap_mean = X.mean(0)
-
-    if bootstrap_s:
-        # Compute mode of normalized covariance s as the extrinsic noise
-        eta = np.cov(X, rowvar=False) / bootstrap_mean[:, None] / bootstrap_mean[None, :]
-        np.fill_diagonal(eta, np.nan)
-        eta = eta[~np.isnan(eta)]
-        hist, bins = np.histogram(eta.flatten(), bins=np.arange(0, 1.0, 0.01) - 0.005)
-        s = (bins[np.argmax(hist)] + bins[np.argmax(hist) + 1]) / 2
-    else:
-        s = 0
-
-    # Calculate residue
-    residue = (bootstrap_var - bootstrap_mean) / bootstrap_mean**2 - s
-    return residue, s
-
-
-def bootstrapping_var(data, bootstrap_s=False, alpha=0.05, B=1000, seed=0, num_cores=1):
-    """
-    Performs bootstrapping to estimate the confidence intervals for (variance - mean)/mean^2, including extrinsic noise estimation.
-
-    Parameters
-    ----------
-    data : ndarray
-        The original dataset with observations as rows and features as columns.
-    bootstrap_s : bool, optional
-        If True, computes the extrinsic noise `s` for each bootstrap sample. Default is False.
-    alpha : float, optional
-        Significance level for confidence intervals. Default is 0.05.
-    B : int, optional
-        Number of bootstrap samples. Default is 1000.
-    seed : int, optional
-        Seed for random number generation. Default is 0.
-    num_cores : int, optional
-        Number of cores to use for parallel processing. Default is 1.
-
+        
     Returns
     -------
     lower_bound : ndarray
-        Lower bound of the confidence interval for the variance residues.
+        The lower confidence bound for each feature.
     upper_bound : ndarray
-        Upper bound of the confidence interval for the variance residues.
-    bootstrap_s : ndarray
-        The extrinsic noise `s` for each bootstrap sample if `bootstrap_s` is True.
-    """
-    np.random.seed(seed)
-    n, p = data.shape
-    bootstrap_indices = np.random.choice(n, size=(B, n), replace=True)
-    
-    # Prepare arguments for multiprocessing
-    args = [(data, bootstrap_indices[b], bootstrap_s) for b in range(B)]
-    
-    bootstrap_residue = np.zeros((B, p))
-    bootstrap_s = np.zeros(B)
+        The upper confidence bound for each feature.
+    s_bootstrap : ndarray
+        The bootstrap estimates of extrinsic noise across bootstrap samples.
+    """ 
 
+    # Set random seed for reproducibility
+    bootstrap_indices = np.arange(B)
+
+    args = [
+        (datasets, indices)  # Each arg contains both datasets and bootstrap_idx
+        for indices in bootstrap_indices
+    ]
+    
     # Use multiprocessing Pool to perform bootstrapping in parallel
-    with Pool(processes=num_cores) as pool:
-        results = list(tqdm(pool.imap(bootstrapping_var_single, args), total=B))
-
-    # Collect results from each bootstrap sample
-    for i, (residue, s) in enumerate(results):
-        bootstrap_residue[i] = residue
-        bootstrap_s[i] = s
+    with Pool(processes=n_cores) as pool:
+        s_bootstrap = pool.starmap(func, args)
+    s_bootstrap = np.array(s_bootstrap)   
 
     # Calculate the confidence interval for the residues
-    lower_bound = np.nanpercentile(bootstrap_residue, alpha/2 * 100, axis=0)
-    upper_bound = np.nanpercentile(bootstrap_residue, (1 - alpha/2) * 100, axis=0)
+    lower_bound = np.nanpercentile(s_bootstrap, alpha / 2 * 100, axis=0)
+    upper_bound = np.nanpercentile(s_bootstrap, (1 - alpha / 2) * 100, axis=0)
 
-    return lower_bound, upper_bound, bootstrap_s
+    # Optionally, you can return both the bootstrap estimates and the confidence intervals
+    return lower_bound, upper_bound, s_bootstrap
+
+def overdispersion(sampled_datasets,idx,eps=0):
+    """
+    This function computes the overdispersion for the sampled datasets. 
+    The normalized variance is defined as:
+    
+        eta = (variance - mean) / mean^2 - eps / mean
+    
+    Parameters
+    ----------
+    sampled_datasets : list of ndarray
+        A list of 2D arrays (datasets), where each dataset represents a set of samples with features.
+        Each dataset should have shape `(n_samples, n_features)`.
+    
+    eps : float or 1D array, optional, default=0
+        A small constant to adjust the normalized variance formula. It can be used to prevent division by zero or
+        to apply a bias to the calculated residue.
+
+    Returns
+    -------
+    s : list of ndarray
+        A list containing the normalized variance for each dataset in `sampled_datasets`.
+        Each entry in the list corresponds to a dataset and has shape `(n_features,)`.
+    """
+    
+    np.random.seed(idx)
+    assert len(sampled_datasets)==1
+    n_samples = sampled_datasets[0].shape[0]
+    b_idx = np.random.choice(a=n_samples,size=n_samples)
+    X = sampled_datasets[0][b_idx]
+    assert len(np.shape(X))==2, "sampled_datasets needs to be a list of 2D arrays"
+    
+    bootstrap_var = X.var(axis=0)
+    bootstrap_mean = X.mean(0)
+
+    # Calculate residue (normalized variance)
+    eta = (bootstrap_var - bootstrap_mean) / bootstrap_mean**2 - eps / bootstrap_mean
+    
+    return np.array(eta)
+
+def delta_eta(sampled_datasets,idx,offset=0):
+    """
+    This function computes the normalized covariance between nascent and mature of each gene. 
+    The normalized covariance is defined as:
+    
+        Δeta = eta_nm - eta_mm
+    
+    Parameters
+    ----------
+    sampled_datasets : list of ndarray
+        A list of 2D arrays (datasets), where each dataset represents a set of samples with features.
+        Each dataset should have shape `(n_samples, n_features)`.
+    offset : float
+        The expected difference between eta_nm and eta_mm: eta_mm - eta_nm - offset
+    
+    Returns
+    -------
+    s : list
+        A list containing the Δeta for each gene.
+    """
+    s = []
+    np.random.seed(idx)
+    n_samples = sampled_datasets[0].shape[0]
+    b_idx = np.random.choice(a=n_samples,size=n_samples)
+    N = sampled_datasets[0][b_idx]
+    M = sampled_datasets[1][b_idx]
+    n, p = np.shape(N)
+    N_mean = np.mean(N, axis=0)
+    M_mean = np.mean(M, axis=0)
+    M_var = np.var(M, axis=0)
+
+    cov = np.sum((N - N_mean[None,:]) * (M - M_mean[None,:]), axis=0) / (n - 1)   
+    eta_nm = cov/N_mean/M_mean
+    eta_mm = (M_var-M_mean)/M_mean**2
+        
+    return eta_mm - eta_nm
     
 def CCC(y1, y2):
     """
